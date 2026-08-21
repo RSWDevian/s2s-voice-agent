@@ -1,0 +1,5 @@
+models/local_checkpoints/
+data/
+__pycache__/
+*.pt
+*.wav

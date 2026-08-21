@@ -1,0 +1,19 @@
+# 1. Huggingface ecosystem for LLM, Codec and training
+transformers>=4.38.0
+accelerate
+peft # Required for LoRa finetuning
+safetensors # Secure and fast model loading
+datasets # For managing the audio-text paired data
+
+# 2. NVIDIA NeMo (For FastConformer)
+cython
+nemo_toolkit['asr']>=1.22.0
+pytorch-lightning
+
+# 3. Audio processing and math operations
+librosa
+soundfile
+numpy
+
+# 4. Utilities
+tqdm # for progress bars during offline extraction
