@@ -1,1 +1,1 @@
-# FastConformer rapper and feature extractor
+# FastConformer wrapper and feature extractor

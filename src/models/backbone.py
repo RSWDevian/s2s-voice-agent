@@ -1,1 +1,1 @@
-# LLM loader & LoRA configuration
+# LLM Loader and LoRA Configurations

@@ -3,3 +3,5 @@ data/
 __pycache__/
 *.pt
 *.wav
+.s2s312
+.DS_Store

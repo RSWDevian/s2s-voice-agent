@@ -1,1 +1,1 @@
-# Codec/ VoCoder (Mimi / EnCodec Wrapper)
+# Codec/Vocoder wrapper

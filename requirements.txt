@@ -1,5 +1,6 @@
-# 1. Huggingface ecosystem for LLM, Codec and training
+# 1. Huggingface ecosystem for LLM, Codec and LoRA training
 transformers>=4.38.0
+huggingface-hub
 accelerate
 peft # Required for LoRa finetuning
 safetensors # Secure and fast model loading
@@ -9,7 +10,9 @@ datasets # For managing the audio-text paired data
 cython
 packaging
 nemo_toolkit[asr]>=1.22.0
-pytorch-lightning
+pytorch-lightning<2.6
+torchcodec
+ffmpeg
 
 # 3. Audio processing and math operations
 librosa
