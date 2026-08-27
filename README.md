@@ -4,11 +4,20 @@ This repository implements an end-to-end multimodal AI pipeline that directly br
 The current pipeline is specifically tuned for Hinglish (Hindi-English) speech recognition and foundational voice-agent adaptation, utilizing a parameter-efficient fine-tuning (PEFT) approach optimized for consumer hardware.
 
 - [Architecture](#architecture)
-- [Training](#training-of-the-mlp)
+- [Multi-stage Training Pipeline](#multi-stage-training-pipeline)
 - [Funstions](#functions)
 
 ### Architecture
 
-### Training of the MLP
+### Multi-stage training pipeline
+
+#### Stage 1: Latent Space Alignment
+The LLM is completely frozen. The MLP projector is trained in isolation using Mean Squared Error (MSE) loss to map the FastConformer's acoustic embeddings directly to the ground-truth text token embeddings extracted from Qwen's internal lookup tables.
+
+#### Stage 2: End-To-End Adaption
+The pre-trained projector is plugged into the LLM via the inputs_embeds layer. Low-Rank Adaptation (LoRA) modules are injected into Qwen's attention mechanisms (Query, Key, Value, Output projections). The system is jointly optimized using Cross-Entropy Loss to perform Automatic Speech Recognition (ASR), teaching the LLM's attention heads to extract meaning from continuous audio tensors.
+
+#### Stage 3: Instruction Fine-tuning
+With foundational speech recognition established, the system will be trained on complex prompt-completion pairs to function as an interactive, instruction-following voice agent.
 
 ### Functions
