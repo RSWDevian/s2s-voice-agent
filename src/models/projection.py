@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 
-class AutioToTextProjection(nn.Module):
+class AudioToTextProjection(nn.Module):
     """
     A 2-layer Multi-layer perceptron (MLP) that maps continuous audio embeddings
     into the LLM's semantic vector space.
@@ -11,7 +11,7 @@ class AutioToTextProjection(nn.Module):
         super().__init__()
 
         # 2-layer MLP with GeLU activation function
-        self.projector = nn.sequential(
+        self.projector = nn.Sequential(
             nn.Linear(encoder_dim, llm_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -46,6 +46,6 @@ if __name__ == "__main__":
     print("Input shape:", dummy_audio_tensor.shape)
     print("Output shape:", output.shape)
     print("[*] The Projector successsfully reshaped the audio tensor to the LLM tensor.")
-    
+
 
 
