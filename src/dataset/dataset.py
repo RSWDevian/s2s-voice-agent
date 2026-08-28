@@ -18,19 +18,22 @@ class FastConformerDataset(Dataset):
         self.data_index = torch.load(self.manifest_path)
         print(f"[*] Loaded PyTorch Dataset with {len(self.data_index)} audio text pairs")
 
+        # Eagerly cache all feature tensors in RAM so repeated epochs don't
+        # re-hit the disk for every item.
+        print(f"[*] Caching {len(self.data_index)} feature tensors in RAM...")
+        self._cache = [
+            (torch.load(item["features_path"]), item["text_transcript"])
+            for item in self.data_index
+        ]
+        print("[*] Feature cache ready.")
+
     def __len__(self):
         """Return the total number of items in the dataset."""
         return len(self.data_index)
 
     def __getitem__(self, idx):
-        """Fetches a single data pair from the harddrive"""
-        item = self.data_index[idx]
-        # Matches the exact keys saved by the extract_features.py
-        tensor_path = item["features_path"]
-        text_transcript = item["text_transcript"]
-        # Load the dense mathematical matrix from the SSD
-        acoustic_features = torch.load(tensor_path)
-
+        """Fetches a single data pair from the in-RAM cache."""
+        acoustic_features, text_transcript = self._cache[idx]
         return acoustic_features, text_transcript
 
 # Quick local test o verify the loader tests
