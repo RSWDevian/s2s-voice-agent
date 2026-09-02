@@ -26,9 +26,13 @@ from src.models.projection import AudioToTextProjection
 
 # Global Configuration for Stage 2
 # Batch size reduced and learning rate lowered for LLM LoRA fine-tuning
-BATCH_SIZE = 2 
+# Tuning: if this OOMs on MPS, halve BATCH_SIZE (try 4-6) rather than adding
+# gradient accumulation. Qwen's ~152K-token vocab makes the cross-entropy
+# logits tensor (batch x seq_len x vocab_size) the main memory driver.
+BATCH_SIZE = 4
 EPOCHS = 3
-LEARNING_RATE = 5e-5 
+LEARNING_RATE = 5e-5
+LOG_EVERY_N_STEPS = 20  # how often to sync loss to CPU for the progress bar
 
 def pad_audio_collate_fn(batch):
     """Pads variable-length audio tensors for batching."""
@@ -97,6 +101,11 @@ class BaseAdaptationTrainer(ABC):
         # 3. Load the specific LLM & Apply LoRA (Implemented by subclass)
         self._load_llm()
 
+        # Match the projector's dtype to the LLM once here instead of casting
+        # every batch in the training loop. Must happen after weight loading
+        # (checkpoints are float32) and before the optimizer is built.
+        self.projector.to(self.llm.dtype)
+
         # 4. Setup Optimizer (Optimizing BOTH Projector and LoRA weights)
         trainable_params = list(self.projector.parameters()) + [p for p in self.llm.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
@@ -115,53 +124,79 @@ class BaseAdaptationTrainer(ABC):
         """Universal Stage 2 training loop using Cross-Entropy Loss."""
         print("\n[*] Commencing Stage 2 Adaptation Training Loop...")
         for epoch in range(self.epochs):
-            total_loss = 0.0
+            total_loss_tensor = torch.zeros((), device=DEVICE)
             progress_bar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}/{self.epochs}")
-            
-            for batch_audio, batch_texts in progress_bar:
-                batch_audio = batch_audio.to(DEVICE)
-                current_batch_size = batch_audio.shape[0]
-                
+
+            for step, (batch_audio, batch_texts) in enumerate(progress_bar):
+                # Cached features are float32; cast to the projector/LLM's
+                # dtype here so the projector's matmul isn't fed a
+                # float32/bfloat16 mix (MPS aborts on that).
+                batch_audio = batch_audio.to(DEVICE, dtype=self.llm.dtype)
+
                 # --- FORWARD PASS: MODALITY 1 (AUDIO) ---
-                projected_audio = self.projector(batch_audio) 
+                # Projector and LLM share a dtype (set once in __init__), so no
+                # per-step dtype casting is needed here.
+                projected_audio = self.projector(batch_audio)
                 audio_seq_len = projected_audio.shape[1]
-                
+
                 # --- FORWARD PASS: MODALITY 2 (TEXT) ---
                 text_embeds, text_input_ids, text_attention_mask = self._get_text_tensors(batch_texts)
-                
-                # Align dtypes to prevent Apple MPS crashes (float32 vs bfloat16)
-                target_dtype = self.llm.dtype
-                projected_audio = projected_audio.to(target_dtype)
-                if text_embeds.dtype != target_dtype:
-                    text_embeds = text_embeds.to(target_dtype)
 
                 # --- CONCATENATE MODALITIES ---
                 # Audio acts as the prompt, Text acts as the generation target
                 combined_embeds = torch.cat([projected_audio, text_embeds], dim=1)
-                
-                # --- CONSTRUCT CAUSAL LABELS ---
-                # Mask audio with -100 (LLM shouldn't predict audio features)
-                audio_labels = torch.full((current_batch_size, audio_seq_len), -100, dtype=torch.long).to(DEVICE)
-                # Mask padding tokens in the text
+
+                # Mask padding tokens in the text. Only text positions are ever
+                # predicted, so no audio-side labels are needed.
                 text_labels = text_input_ids.masked_fill(text_attention_mask == 0, -100)
-                # Combine labels
-                combined_labels = torch.cat([audio_labels, text_labels], dim=1)
-                
-                # --- LLM FORWARD & LOSS ---
-                # Passing labels automatically triggers Cross-Entropy Loss calculation
-                outputs = self.llm(inputs_embeds=combined_embeds, labels=combined_labels)
-                loss = outputs.loss
+
+                # --- LLM FORWARD: TRANSFORMER BODY ONLY (no lm_head yet) ---
+                # Calling the inner transformer directly (bypassing the
+                # CausalLM wrapper's forward) avoids projecting every
+                # audio-prefix position through the ~152K-vocab lm_head only
+                # to discard it via -100 masking. Passing labels= to the full
+                # wrapper still computes logits for the *entire* sequence
+                # internally regardless of the mask, so that overhead can only
+                # be avoided by skipping lm_head ourselves on those positions.
+                transformer_out = self.llm.base_model.model.model(inputs_embeds=combined_embeds, use_cache=False)
+                hidden_states = transformer_out.last_hidden_state
+
+                # --- LM HEAD + LOSS ON TEXT POSITIONS ONLY ---
+                # Position (audio_seq_len - 1) is the last audio-prefix
+                # position; its next-token prediction is the first text
+                # token. This slice mirrors the standard causal-LM label
+                # shift (logits[:-1] predicts labels[1:]) restricted to the
+                # text region only.
+                predict_hidden = hidden_states[:, audio_seq_len - 1:-1, :]
+                lm_head = self.llm.base_model.model.get_output_embeddings()
+                logits = lm_head(predict_hidden)
+                # Upcast to float32 for the softmax/loss, matching what
+                # transformers' built-in loss does internally for stability.
+                loss = nn.functional.cross_entropy(
+                    logits.float().reshape(-1, logits.size(-1)),
+                    text_labels.reshape(-1),
+                    ignore_index=-100,
+                )
                 
                 # --- BACKWARD PASS ---
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-                
-                loss_value = loss.item()
-                total_loss += loss_value
-                progress_bar.set_postfix(loss=loss_value)
-                
-            avg_loss = total_loss / len(self.dataloader)
+
+                # Keep the running total on-device; only sync to CPU
+                # periodically to avoid forcing an MPS queue drain every step.
+                total_loss_tensor += loss.detach()
+                if (step + 1) % LOG_EVERY_N_STEPS == 0 or (step + 1) == len(self.dataloader):
+                    progress_bar.set_postfix(loss=loss.item())
+                    # Audio/text are padded per-batch, so every step's tensor
+                    # shapes differ. MPS's caching allocator doesn't reliably
+                    # reuse cached blocks across shapes, so its reserved pool
+                    # grows unboundedly without this — periodically (not every
+                    # step, since this forces a sync) hand unused blocks back.
+                    if DEVICE.type == "mps":
+                        torch.mps.empty_cache()
+
+            avg_loss = (total_loss_tensor / len(self.dataloader)).item()
             print(f"\n[+] Epoch {epoch+1} Completed. Average Loss: {avg_loss:.4f}")
 
             # Auto-save after every epoch

@@ -2,6 +2,7 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
 import os
+from concurrent.futures import ThreadPoolExecutor
 from src.config import PROCESSED_TENSORS_DIR
 
 class FastConformerDataset(Dataset):
@@ -19,12 +20,17 @@ class FastConformerDataset(Dataset):
         print(f"[*] Loaded PyTorch Dataset with {len(self.data_index)} audio text pairs")
 
         # Eagerly cache all feature tensors in RAM so repeated epochs don't
-        # re-hit the disk for every item.
+        # re-hit the disk for every item. Loaded in parallel with a thread
+        # pool since torch.load is I/O-bound and releases the GIL.
         print(f"[*] Caching {len(self.data_index)} feature tensors in RAM...")
-        self._cache = [
-            (torch.load(item["features_path"]), item["text_transcript"])
-            for item in self.data_index
-        ]
+        max_workers = min(8, (os.cpu_count() or 4))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            features = list(executor.map(
+                lambda item: torch.load(item["features_path"]), self.data_index
+            ))
+        self._cache = list(zip(
+            features, (item["text_transcript"] for item in self.data_index)
+        ))
         print("[*] Feature cache ready.")
 
     def __len__(self):
