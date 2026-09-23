@@ -10,7 +10,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from src.config import CHECKPOINTS_DIR
+from src.config import CHECKPOINTS_DIR, LLM_ID
 
 # clean logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
@@ -103,7 +103,7 @@ def download_all_models():
     download_registry = [
         # The reasoning backbone
         HuggingFaceModelDownloader(
-            model_name="Qwen/Qwen2.5-1.5B",
+            model_name=LLM_ID,
             folder_name="qwen_backbone"
         ),
         # Audio codec /vocoder model

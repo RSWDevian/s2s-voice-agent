@@ -20,3 +20,12 @@ def get_device():
         return torch.device("cpu")
 
 DEVICE = get_device()
+
+# LLM backbone
+LLM_ID = "Qwen/Qwen2.5-0.5B-Instruct"
+LLM_DIM = 896  # hidden_size of LLM_ID
+
+# Training data
+DATASET_ID = "agarwalayushi/hinglish"  # HF dataset: audio + text pairs
+AUDIO_SAMPLE_RATE = 16000  # FastConformer's expected input rate
+MIMI_SAMPLE_RATE = 24000  # Mimi codec's native rate (models/local_checkpoints/mimi_codec/config.json)

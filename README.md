@@ -18,10 +18,10 @@ graph TD
     B:::encoder -->|512-dim Acoustic Tensor| C{MLP Modality Projector}
     
     T[Text Transcript] -->|Tokenizer| U(Input Embeddings)
-    U:::text -->|1536-dim Text Tensor| D
+    U:::text -->|896-dim Text Tensor| D
     
-    C:::projector -->|1536-dim Semantic Projection| D((Vector Concatenation))
-    D --> E[Qwen2.5-1.5B Attention Layers]
+    C:::projector -->|896-dim Semantic Projection| D((Vector Concatenation))
+    D --> E[Qwen2.5-0.5B-Instruct Attention Layers]
     
     E:::llm <--> F([LoRA Adapters])
     F:::llm --> G[Next Token Prediction]
@@ -32,12 +32,12 @@ The system utilizes NVIDIA's FastConformer as the sensory backbone. It processes
 #### 2. Modality Projector
 Acoustic embeddings and text embeddings exist in vastly different mathematical latent spaces. To bridge this gap, a 2-layer Multi-Layer Perceptron (MLP) acts as a universal translator.
 
-- Structure: Linear(512, 1536) -> GELU -> Dropout(0.1) -> Linear(1536, 1536)
+- Structure: Linear(512, 896) -> GELU -> Dropout(0.1) -> Linear(896, 896)
 
 - Function: The GELU non-linearity allows the network to warp the acoustic physics space to mimic the exact semantic coordinate space expected by the language model.
 
 #### 3. Cognitive Engine
-The core reasoning engine is Qwen2.5-1.5B, processed in bfloat16 precision for memory efficiency.
+The core reasoning engine is Qwen2.5-0.5B-Instruct, processed in bfloat16 precision for memory efficiency.
 
 - Input Injection: The projected audio tensors are passed directly into the LLM via the inputs_embeds parameter, entirely bypassing the text tokenizer.
 

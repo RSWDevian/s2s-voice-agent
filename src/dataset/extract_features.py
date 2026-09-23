@@ -7,7 +7,7 @@ from datasets import load_dataset
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
-from src.config import CHECKPOINTS_DIR, PROCESSED_TENSORS_DIR, DEVICE
+from src.config import CHECKPOINTS_DIR, PROCESSED_TENSORS_DIR, DEVICE, DATASET_ID
 os.makedirs(PROCESSED_TENSORS_DIR, exist_ok=True)
 
 class FastConformerExtractor:
@@ -61,7 +61,7 @@ class FastConformerExtractor:
 
         return encoded_audio.transpose(1,2).cpu()
 
-def run_feature_extraction(dataset_name: str = ""):
+def run_feature_extraction(dataset_name: str = DATASET_ID):
     manifest_path = os.path.join(PROCESSED_TENSORS_DIR, "manifest.pt")
 
     # Resume logic
@@ -109,4 +109,4 @@ def run_feature_extraction(dataset_name: str = ""):
 
 
 if __name__ == "__main__":
-    run_feature_extraction(dataset_name="agarwalayushi/hinglish")
+    run_feature_extraction()

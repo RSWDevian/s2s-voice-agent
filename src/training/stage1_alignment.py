@@ -13,7 +13,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from src.config import CHECKPOINTS_DIR, DEVICE
+from src.config import CHECKPOINTS_DIR, DEVICE, LLM_ID, LLM_DIM
 
 try:
     from src.dataset.dataset import FastConformerDataset
@@ -74,7 +74,7 @@ class BaseAlignmentTrainer(ABC):
 
         # 2. Initialize the Trainable MLP Projector
         print("[*] Initializing the MLP projector...")
-        self.projector = AudioToTextProjection(encoder_dim=encoder_dim, llm_dim=1536).to(DEVICE)
+        self.projector = AudioToTextProjection(encoder_dim=encoder_dim, llm_dim=LLM_DIM).to(DEVICE)
         
         # Resume Checkpoint Logic
         save_dir = os.path.join(CHECKPOINTS_DIR, "trained_projector")
@@ -150,7 +150,7 @@ class BaseAlignmentTrainer(ABC):
 
 
 class QwenAlignmentTrainer(BaseAlignmentTrainer):
-    def __init__(self, llm_id: str = "Qwen/Qwen2.5-1.5B", **kwargs):
+    def __init__(self, llm_id: str = LLM_ID, **kwargs):
         self.llm_id = llm_id
         super().__init__(**kwargs)
 
