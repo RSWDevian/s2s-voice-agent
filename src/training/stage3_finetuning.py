@@ -423,10 +423,18 @@ class Stage3Trainer:
                 # Keep the running total on-device; only sync to CPU periodically.
                 total_loss += loss.detach()
                 steps_run += 1
+
+                # Every batch has a different padded audio/code length, and MPS's caching
+                # allocator doesn't reliably reuse blocks across shapes, so its reserved pool
+                # grows (and step time climbs) unboundedly without this. Cleared every step
+                # (not just periodically) since Stage 3's shape variance is wide enough that
+                # waiting for the periodic log tick let the reserved pool -- and step time --
+                # grow noticeably in between.
+                if self.device.type == "mps":
+                    torch.mps.empty_cache()
+
                 if (step + 1) % LOG_EVERY_N_STEPS == 0 or (step + 1) == steps_per_epoch:
                     progress_bar.set_postfix(loss=loss.item())
-                    if self.device.type == "mps":
-                        torch.mps.empty_cache()  # per-batch shapes vary; return unused blocks to the OS
 
             print(f"\n[+] Epoch {epoch+1} Completed. Average Loss: {(total_loss / max(steps_run, 1)).item():.4f}")
             self.save_checkpoint()

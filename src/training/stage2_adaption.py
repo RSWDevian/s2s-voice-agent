@@ -41,6 +41,8 @@ BATCH_SIZE = 3
 EPOCHS = 3
 LEARNING_RATE = 5e-5
 LOG_EVERY_N_STEPS = 20  # how often to sync loss to CPU for the progress bar
+MAX_GRAD_NORM = 1.0
+MAX_CONSECUTIVE_BAD_STEPS = 5  # abort after this many non-finite steps in a row instead of training on garbage
 
 # --- Backward-pass depth reduction ---
 # LoRA adapters normally sit in every one of Qwen's 24 attention blocks, and
@@ -62,6 +64,19 @@ LOG_EVERY_N_STEPS = 20  # how often to sync loss to CPU for the progress bar
 # the previous (slower, jointly-trained) behavior.
 FREEZE_PROJECTOR_STAGE2 = True
 LORA_LAYERS_TO_TRANSFORM = list(range(16, 24))  # top 8 of Qwen2.5-0.5B's 24 layers
+
+def backward_and_step(loss: torch.Tensor, optimizer, params) -> bool:
+    """Backward + clipped optimizer step. Returns False, leaving the weights untouched, when the gradients are
+    non-finite: one NaN step would otherwise poison AdamW's state and every weight from then on."""
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    grad_norm = torch.nn.utils.clip_grad_norm_(params, MAX_GRAD_NORM)
+    if not torch.isfinite(grad_norm):
+        optimizer.zero_grad(set_to_none=True)
+        return False
+    optimizer.step()
+    return True
+
 
 class IndexedDataset(Dataset):
     """Wraps FastConformerDataset to also yield the sample index, so the
@@ -166,8 +181,8 @@ class BaseAdaptationTrainer(ABC):
 
         # 4. Setup Optimizer (Projector params only included when not frozen)
         projector_params = [] if FREEZE_PROJECTOR_STAGE2 else list(self.projector.parameters())
-        trainable_params = projector_params + [p for p in self.llm.parameters() if p.requires_grad]
-        self.optimizer = torch.optim.AdamW(trainable_params, lr=self.learning_rate)
+        self.trainable_params = projector_params + [p for p in self.llm.parameters() if p.requires_grad]
+        self.optimizer = torch.optim.AdamW(self.trainable_params, lr=self.learning_rate)
 
     @abstractmethod
     def _load_llm(self):
@@ -218,8 +233,10 @@ class BaseAdaptationTrainer(ABC):
         if self.max_steps_per_epoch is not None:
             steps_per_epoch = min(steps_per_epoch, self.max_steps_per_epoch)
 
+        bad_steps = 0
         for epoch in range(self.epochs):
             total_loss_tensor = torch.zeros((), device=DEVICE)
+            steps_run = 0
             progress_bar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}/{self.epochs}", total=steps_per_epoch)
 
             for step, (batch_audio, text_embeds, text_input_ids, text_attention_mask) in enumerate(progress_bar):
@@ -280,13 +297,18 @@ class BaseAdaptationTrainer(ABC):
                 )
                 
                 # --- BACKWARD PASS ---
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
+                if not backward_and_step(loss, self.optimizer, self.trainable_params):
+                    bad_steps += 1
+                    print(f"\n[!] Non-finite gradients at epoch {epoch+1} step {step+1}; step skipped ({bad_steps} in a row).")
+                    if bad_steps >= MAX_CONSECUTIVE_BAD_STEPS:
+                        raise RuntimeError("Training diverged: repeated non-finite gradients. Nothing was saved from these steps.")
+                    continue
+                bad_steps = 0
 
                 # Keep the running total on-device; only sync to CPU
                 # periodically to avoid forcing an MPS queue drain every step.
                 total_loss_tensor += loss.detach()
+                steps_run += 1
                 if (step + 1) % LOG_EVERY_N_STEPS == 0 or (step + 1) == steps_per_epoch:
                     progress_bar.set_postfix(loss=loss.item())
                     # Audio/text are padded per-batch, so every step's tensor
@@ -297,13 +319,16 @@ class BaseAdaptationTrainer(ABC):
                     if DEVICE.type == "mps":
                         torch.mps.empty_cache()
 
-            avg_loss = (total_loss_tensor / steps_per_epoch).item()
+            avg_loss = (total_loss_tensor / max(steps_run, 1)).item()
             print(f"\n[+] Epoch {epoch+1} Completed. Average Loss: {avg_loss:.4f}")
 
             # Auto-save after every epoch
             self.save_checkpoint()
 
     def save_checkpoint(self):
+        bad = [n for n, p in self.llm.named_parameters() if p.requires_grad and not torch.isfinite(p).all()]
+        if bad:
+            raise RuntimeError(f"Refusing to save a checkpoint with NaN/Inf weights (e.g. {bad[0]}).")
         os.makedirs(self.save_dir, exist_ok=True)
         # Save LoRA adapters
         self.llm.save_pretrained(self.stage2_lora_path)
