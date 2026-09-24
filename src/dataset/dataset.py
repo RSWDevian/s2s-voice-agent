@@ -26,7 +26,10 @@ class FastConformerDataset(Dataset):
         max_workers = min(8, (os.cpu_count() or 4))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             features = list(executor.map(
-                lambda item: torch.load(item["features_path"]), self.data_index
+                lambda item: torch.load(os.path.join(
+                    PROCESSED_TENSORS_DIR, os.path.basename(item["features_path"])
+                )),
+                self.data_index,
             ))
         self._cache = list(zip(
             features, (item["text_transcript"] for item in self.data_index)

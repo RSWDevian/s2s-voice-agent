@@ -13,7 +13,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from src.config import CHECKPOINTS_DIR, DEVICE, LLM_ID, LLM_DIM
+from src.config import CHECKPOINTS_DIR, DEVICE, LLM_ID, LLM_DIM, TRAINED_MODELS_DIR
 
 try:
     from src.dataset.dataset import FastConformerDataset
@@ -77,7 +77,7 @@ class BaseAlignmentTrainer(ABC):
         self.projector = AudioToTextProjection(encoder_dim=encoder_dim, llm_dim=LLM_DIM).to(DEVICE)
         
         # Resume Checkpoint Logic
-        save_dir = os.path.join(CHECKPOINTS_DIR, "trained_projector")
+        save_dir = os.path.join(TRAINED_MODELS_DIR, "trained_projector")
         self.checkpoint_path = os.path.join(save_dir, f"mlp_stage1_{self.__class__.__name__}.pth")
         
         if resume:

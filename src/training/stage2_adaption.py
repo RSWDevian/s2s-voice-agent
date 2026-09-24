@@ -16,7 +16,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from src.config import CHECKPOINTS_DIR, DEVICE, LLM_ID, LLM_DIM
+from src.config import CHECKPOINTS_DIR, DEVICE, LLM_ID, LLM_DIM, TRAINED_MODELS_DIR
 
 try:
     from src.dataset.dataset import FastConformerDataset
@@ -128,11 +128,11 @@ class BaseAdaptationTrainer(ABC):
         self.projector = AudioToTextProjection(encoder_dim=encoder_dim, llm_dim=LLM_DIM).to(DEVICE)
         
         # --- WEIGHT LOADING LOGIC (Stage 1 vs Resume Stage 2) ---
-        self.save_dir = os.path.join(CHECKPOINTS_DIR, "stage2_adaptation")
+        self.save_dir = os.path.join(TRAINED_MODELS_DIR, "stage2_adaptation")
         self.stage2_proj_path = os.path.join(self.save_dir, f"mlp_stage2_{self.__class__.__name__}.pth")
         self.stage2_lora_path = os.path.join(self.save_dir, f"lora_{self.__class__.__name__}")
-        
-        stage1_proj_path = os.path.join(CHECKPOINTS_DIR, "trained_projector", f"mlp_stage1_QwenAlignmentTrainer.pth")
+
+        stage1_proj_path = os.path.join(TRAINED_MODELS_DIR, "trained_projector", f"mlp_stage1_QwenAlignmentTrainer.pth")
 
         if resume and os.path.exists(self.stage2_proj_path):
             print(f"[*] Resuming Stage 2: Loading projector weights from {self.stage2_proj_path}...")

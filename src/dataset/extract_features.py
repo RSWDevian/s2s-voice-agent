@@ -1,4 +1,5 @@
 # Offline script: .wav -> FastConformer -> .pt
+import argparse
 import os
 import sys
 import torch
@@ -61,7 +62,7 @@ class FastConformerExtractor:
 
         return encoded_audio.transpose(1,2).cpu()
 
-def run_feature_extraction(dataset_name: str = DATASET_ID):
+def run_feature_extraction(dataset_name: str = DATASET_ID, target_samples: int | None = None):
     manifest_path = os.path.join(PROCESSED_TENSORS_DIR, "manifest.pt")
 
     # Resume logic
@@ -99,6 +100,10 @@ def run_feature_extraction(dataset_name: str = DATASET_ID):
 
             if (i + 1) % 100 == 0:
                 torch.save(manifest, manifest_path)
+
+            if target_samples is not None and len(manifest) >= target_samples:
+                print(f"\n[*] Reached target of {target_samples} samples.")
+                break
     except KeyboardInterrupt:
         print(f"\n[!] Process paused by user (Ctrl + C)...")
     finally:
@@ -109,4 +114,22 @@ def run_feature_extraction(dataset_name: str = DATASET_ID):
 
 
 if __name__ == "__main__":
-    run_feature_extraction()
+    parser = argparse.ArgumentParser(description="Extract FastConformer features from the streaming HF dataset.")
+    parser.add_argument(
+        "--target-samples", type=int, default=None,
+        help="Stop once the manifest reaches this many total samples. Omit to stream unbounded "
+             "toward the full dataset (~815K examples for the default DATASET_ID) unless interrupted.",
+    )
+    args = parser.parse_args()
+    if args.target_samples is None:
+        print("[!] No --target-samples given: this run is unbounded and will stream toward the "
+              "full dataset unless interrupted (Ctrl+C is handled gracefully).")
+
+    run_feature_extraction(target_samples=args.target_samples)
+    # HF `datasets` streaming leaves background threads that crash the interpreter
+    # (PyGILState_Release) during normal shutdown; all data is already saved above,
+    # so exit immediately rather than going through that teardown path. os._exit()
+    # skips stdio flushing, so flush explicitly first.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

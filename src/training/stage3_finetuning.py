@@ -11,7 +11,7 @@ from safetensors.torch import load_file
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.cache_utils import DynamicCache
 from transformers.trainer_pt_utils import LengthGroupedSampler
 
 # Ensuring root directory is available for imports
@@ -19,7 +19,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from src.config import CHECKPOINTS_DIR, LLM_DIM, LLM_ID
+from src.config import CHECKPOINTS_DIR, DEVICE, LLM_DIM, LLM_ID, TRAINED_MODELS_DIR
+from src.models.backbone import QwenBackbone
 from src.models.projection import AudioToTextProjection
 
 # Global Configuration for Stage 3 (untuned starting points)
@@ -41,17 +42,16 @@ MAX_TARGET_FRAMES = 100  # 8 s; longer targets are cut at a frame boundary (keep
 INIT_FROM_STAGE2 = True
 FRESH_LORA_LAYERS = None  # only used for a fresh LoRA; None = all layers (backward is full-depth anyway)
 
-STAGE1_PROJECTOR_PATH = os.path.join(CHECKPOINTS_DIR, "trained_projector", "mlp_stage1_QwenAlignmentTrainer.pth")
-STAGE2_LORA_PATH = os.path.join(CHECKPOINTS_DIR, "stage2_adaptation", "lora_QwenAdaptationTrainer")
-STAGE3_LORA_PATH = os.path.join(CHECKPOINTS_DIR, "stage3_lora")
+STAGE1_PROJECTOR_PATH = os.path.join(TRAINED_MODELS_DIR, "trained_projector", "mlp_stage1_QwenAlignmentTrainer.pth")
+STAGE2_LORA_PATH = os.path.join(TRAINED_MODELS_DIR, "stage2_adaptation", "lora_QwenAdaptationTrainer")
+STAGE3_LORA_PATH = os.path.join(TRAINED_MODELS_DIR, "stage3_lora")
 
 IGNORE_INDEX = -100
 VOCAB_FILE = "audio_vocab.json"
 
 
 def select_device() -> torch.device:
-    # Deliberately never CUDA: this stage targets Apple Silicon unified memory.
-    return torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+    return DEVICE
 
 
 @dataclass(frozen=True)
@@ -144,8 +144,18 @@ def flatten_codes(codes: torch.Tensor, vocab: AudioVocab, max_frames: int = MAX_
 def unflatten_ids(ids: torch.Tensor, vocab: AudioVocab) -> torch.Tensor:
     """Inverse of flatten_codes for whole frames: token ids [T*K] -> Mimi codes [K, T]."""
     frames = ids.reshape(-1, vocab.num_codebooks).t()
-    offsets = (torch.arange(vocab.num_codebooks) * vocab.codebook_size + vocab.base_id).unsqueeze(1)
+    offsets = (torch.arange(vocab.num_codebooks, device=ids.device) * vocab.codebook_size + vocab.base_id).unsqueeze(1)
     return frames - offsets
+
+
+def trim_to_codes(ids: torch.Tensor, vocab: AudioVocab) -> torch.Tensor:
+    """Strips a trailing <|audio_end|> (present when generation stopped naturally) and any
+    incomplete trailing frame, leaving a length that's an exact multiple of vocab.num_codebooks
+    and safe to pass to unflatten_ids. Safe on an already-trimmed or empty tensor."""
+    if ids.numel() > 0 and int(ids[-1].item()) == vocab.end_id:
+        ids = ids[:-1]
+    n_frames = ids.numel() // vocab.num_codebooks
+    return ids[: n_frames * vocab.num_codebooks]
 
 
 class Stage3Collator:
@@ -204,6 +214,110 @@ def audio_token_loss(llm, projected_audio, audio_mask, target_ids, vocab: AudioV
     return F.cross_entropy(logits.float().reshape(-1, vocab.size), labels.reshape(-1), ignore_index=IGNORE_INDEX)
 
 
+MAX_GENERATED_TOKENS = NUM_CODEBOOKS * MAX_TARGET_FRAMES  # 800 = 8s cap, mirrors training's MAX_TARGET_FRAMES
+
+
+def _audio_head_logits(inner, hidden: torch.Tensor, vocab: AudioVocab) -> torch.Tensor:
+    """hidden: last-step hidden state, shape [1, seq, D] (only the final position is used).
+    Returns float32 logits, shape [vocab.size], restricted to the audio-token vocabulary slice
+    (same head-weight trick as audio_token_loss). <|audio_start|> is masked to -inf: it is a
+    valid input-priming token but must never be a *generated* output (training targets — see
+    Stage3Collator — never include it as a label, only code ids and an optional trailing
+    <|audio_end|>), so this keeps trim_to_codes()'s "only a trailing end_id is non-code" guarantee
+    watertight even from an undertrained model."""
+    head_weight = inner.get_output_embeddings().weight[vocab.base_id: vocab.total_vocab_size]
+    logits = F.linear(hidden[:, -1, :], head_weight.to(hidden.dtype)).float().squeeze(0)
+    logits[vocab.start_id - vocab.base_id] = float("-inf")
+    return logits
+
+
+def _sample_next_id(
+    logits: torch.Tensor, temperature: float, top_k: int | None, generator: torch.Generator | None
+) -> int:
+    """logits: float32, shape [vocab.size]. Returns a local index in [0, vocab.size)."""
+    if temperature <= 0.0:
+        return int(logits.argmax(-1).item())
+    scaled = logits / temperature
+    if top_k is not None and top_k < scaled.shape[-1]:
+        values, indices = scaled.topk(top_k)
+        probs = F.softmax(values, dim=-1)
+        return int(indices[torch.multinomial(probs, 1, generator=generator)].item())
+    probs = F.softmax(scaled, dim=-1)
+    return int(torch.multinomial(probs, 1, generator=generator).item())
+
+
+@torch.no_grad()
+def generate_audio_tokens(
+    llm,
+    vocab: AudioVocab,
+    projected_audio: torch.Tensor,
+    max_new_tokens: int = MAX_GENERATED_TOKENS,
+    temperature: float = 0.0,
+    top_k: int | None = None,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Autoregressively decodes Mimi audio tokens from already-projected audio embeddings,
+    stepping the LLM one token at a time with KV caching (mirrors audio_token_loss's forward
+    pass, but causal/generative instead of teacher-forced). v1: batch_size == 1 only.
+
+    Sequence primed as [projected_audio][<|audio_start|> embedding]; the hidden state at the
+    <|audio_start|> position predicts the first audio token (matches training semantics).
+    Stops when vocab.end_id is sampled (appended as the final element of the return value) or
+    max_new_tokens tokens have been generated (end_id NOT appended in that case).
+
+    Caller must put `llm` in eval() mode; this function does not toggle it (mirrors
+    audio_token_loss, which likewise assumes the caller manages train/eval state).
+
+    Returns a 1-D LongTensor with values in [vocab.base_id, vocab.total_vocab_size) — the raw
+    audio-token id space (not re-based to 0). Pass through trim_to_codes() before
+    unflatten_ids().
+    """
+    if projected_audio.dim() != 3 or projected_audio.shape[0] != 1:
+        raise ValueError(f"generate_audio_tokens only supports batch_size=1, got shape {tuple(projected_audio.shape)}")
+    if max_new_tokens <= 0:
+        raise ValueError("max_new_tokens must be positive")
+
+    inner = llm.base_model.model
+    device = projected_audio.device
+
+    start = torch.full((1, 1), vocab.start_id, dtype=torch.long, device=device)
+    start_embed = inner.get_input_embeddings()(start).to(projected_audio.dtype)
+    inputs_embeds = torch.cat([projected_audio, start_embed], dim=1)
+    cur_len = inputs_embeds.shape[1]
+
+    attention_mask = torch.ones(1, cur_len, dtype=torch.long, device=device)
+    position_ids = (attention_mask.cumsum(-1) - 1).clamp(min=0)
+
+    cache = DynamicCache()
+    out = inner.model(
+        inputs_embeds=inputs_embeds, attention_mask=attention_mask,
+        position_ids=position_ids, past_key_values=cache, use_cache=True,
+    )
+    hidden, cache = out.last_hidden_state, out.past_key_values
+
+    generated: list[int] = []
+    for _ in range(max_new_tokens):
+        logits = _audio_head_logits(inner, hidden, vocab)
+        token_id = vocab.base_id + _sample_next_id(logits, temperature, top_k, generator)
+        generated.append(token_id)
+        if token_id == vocab.end_id:
+            break
+
+        next_embed = inner.get_input_embeddings()(
+            torch.tensor([[token_id]], dtype=torch.long, device=device)
+        ).to(projected_audio.dtype)
+        cur_len += 1
+        attention_mask = torch.ones(1, cur_len, dtype=torch.long, device=device)
+        position_ids = torch.full((1, 1), cur_len - 1, dtype=torch.long, device=device)
+        out = inner.model(
+            inputs_embeds=next_embed, attention_mask=attention_mask,
+            position_ids=position_ids, past_key_values=cache, use_cache=True,
+        )
+        hidden, cache = out.last_hidden_state, out.past_key_values
+
+    return torch.tensor(generated, dtype=torch.long, device=device)
+
+
 def backward_and_step(loss: torch.Tensor, optimizer, params) -> bool:
     """Backward + clipped optimizer step. Returns False, leaving the weights untouched, when the gradients are
     non-finite: one NaN step would otherwise poison AdamW's state and every weight from then on."""
@@ -218,19 +332,9 @@ def backward_and_step(loss: torch.Tensor, optimizer, params) -> bool:
 
 
 def load_backbone(device: torch.device):
-    """Loads the Qwen tokenizer and bfloat16 LLM (local folder first, HF cache otherwise), as Stage 2 does."""
-    local_backbone = os.path.join(CHECKPOINTS_DIR, "qwen_backbone")
-    if os.path.exists(local_backbone) and len(os.listdir(local_backbone)) > 0:
-        source, cache_kwargs = local_backbone, {}
-    else:
-        source, cache_kwargs = LLM_ID, {"cache_dir": CHECKPOINTS_DIR}
-    print(f"[*] Loading Qwen backbone from {source} onto {device}...")
-
-    tokenizer = AutoTokenizer.from_pretrained(source, **cache_kwargs)
-    llm = AutoModelForCausalLM.from_pretrained(
-        source, dtype=torch.bfloat16, attn_implementation="sdpa", **cache_kwargs
-    ).to(device)
-    return tokenizer, llm
+    """Loads the Qwen tokenizer and bfloat16 LLM via the shared QwenBackbone module."""
+    backbone = QwenBackbone(device=device, freeze=False)
+    return backbone.tokenizer, backbone.model
 
 
 def _load_lora_weights(model, saved: dict):
@@ -297,12 +401,15 @@ def save_stage3_adapter(model, vocab: AudioVocab, directory: str):
 
 
 def load_stage3_llm(adapter_dir: str = STAGE3_LORA_PATH, device: torch.device | None = None):
-    """Rebuilds the Stage 3 model from a saved adapter directory (for inference / verification)."""
+    """Rebuilds the Stage 3 model from a saved adapter directory (for inference / verification).
+    Returns (peft_model, vocab, backbone) — callers get a handle on the QwenBackbone that
+    produced peft_model, rather than the backbone being loaded and discarded internally."""
     device = device or select_device()
     vocab = AudioVocab.load(adapter_dir)
-    _, llm = load_backbone(device)
-    extend_llm_vocab(llm, vocab)
-    return PeftModel.from_pretrained(llm, adapter_dir), vocab
+    backbone = QwenBackbone(device=device, freeze=True)
+    extend_llm_vocab(backbone.model, vocab)
+    llm = PeftModel.from_pretrained(backbone.model, adapter_dir)
+    return llm, vocab, backbone
 
 
 def sample_lengths(dataset: Dataset, vocab: AudioVocab) -> list[int]:

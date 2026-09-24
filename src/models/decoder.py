@@ -65,6 +65,25 @@ class MimiCodec(nn.Module):
         output = self.model.encode(waveform, num_quantizers=num_quantizers)
         return output.audio_codes.squeeze(0).cpu()  # (num_quantizers, num_frames)
 
+    @torch.no_grad()
+    def decode(self, codes: torch.Tensor) -> torch.Tensor:
+        """
+        Decodes discrete Mimi codes back into a raw waveform at MIMI_SAMPLE_RATE (24kHz).
+
+        Args:
+            codes (torch.Tensor): Mimi codes, shape (num_quantizers, num_frames) or
+                (1, num_quantizers, num_frames). num_quantizers should match what the
+                codes were encoded with (Stage 3 trains on 8).
+        Returns:
+            torch.Tensor: Reconstructed waveform, shape (num_samples,), on CPU.
+        """
+        if codes.dim() == 2:
+            codes = codes.unsqueeze(0)  # (1, num_quantizers, num_frames)
+        codes = codes.to(self.device).long()
+
+        output = self.model.decode(codes)
+        return output.audio_values.squeeze(0).squeeze(0).cpu()  # (num_samples,)
+
 
 if __name__ == "__main__":
     # Standalone smoke test
@@ -78,3 +97,6 @@ if __name__ == "__main__":
     codes = codec.encode(dummy_audio)
     print(f"[+] Input audio shape: {dummy_audio.shape}")
     print(f"[+] Output codes shape: {codes.shape}")
+
+    waveform = codec.decode(codes)
+    print(f"[+] Decoded waveform shape: {waveform.shape}")

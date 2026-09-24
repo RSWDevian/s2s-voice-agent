@@ -71,3 +71,10 @@ def run_mimi_extraction(dataset_name: str = DATASET_ID):
 
 if __name__ == "__main__":
     run_mimi_extraction()
+    # HF `datasets` streaming leaves background threads that crash the interpreter
+    # (PyGILState_Release) during normal shutdown; all data is already saved above,
+    # so exit immediately rather than going through that teardown path. os._exit()
+    # skips stdio flushing, so flush explicitly first.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

@@ -7,6 +7,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 RAW_AUDIO_DIR = os.path.join(DATA_DIR, 'raw_audio')
 PROCESSED_TENSORS_DIR = os.path.join(DATA_DIR, 'processed_tensors')
+TRAINED_MODELS_DIR = os.path.join(DATA_DIR, 'trained_models')
 CHECKPOINTS_DIR = os.path.join(BASE_DIR, 'models', 'local_checkpoints')
 ADAPTERS_DIR = os.path.join(BASE_DIR, 'models', 'adapters')
 

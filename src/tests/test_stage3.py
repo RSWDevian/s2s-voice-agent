@@ -224,9 +224,9 @@ def test_sample_lengths_terminates_and_counts_target_tokens():
     assert len(list(s3.DummyAudioTokenDataset(num_samples=4))) == 4
 
 
-def test_device_is_never_cuda(monkeypatch):
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    assert s3.select_device().type in ("mps", "cpu")
+def test_device_matches_shared_config_device():
+    from src.config import DEVICE
+    assert s3.select_device() == DEVICE
 
 
 @pytest.mark.skipif(
